@@ -32,7 +32,7 @@ timeout_seconds = 45
 [dictation]
 cleanup = true
 dictionary = "dictionary.txt"
-clipboard_restore_seconds = 0.30
+clipboard_restore_seconds = 0.45 # Delay before restoring your old clipboard; a slow target app that pastes later gets the OLD clipboard, so do not go much lower.
 cancel_if_app_changes = true
 single_line = true # Avoid embedded newlines in terminal pastes.
 log = "dictate.log"

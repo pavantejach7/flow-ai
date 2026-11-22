@@ -248,16 +248,35 @@ class DictationTests(unittest.TestCase):
         self.assertEqual(ind["accent"], "#5468FF")
         self.assertAlmostEqual(ind["gain"], 6.0)
 
+    def _config_with(self, replacements):
+        """Write config.toml with `old -> new` line substitutions to a temp file; return its path."""
+        import tempfile
+        text = (d.ROOT / "config.toml").read_text()
+        for old, new in replacements.items():
+            self.assertIn(old, text)
+            text = text.replace(old, new)
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
+        tmp.write(text); tmp.close()
+        self.addCleanup(lambda: Path(tmp.name).unlink(missing_ok=True))
+        return tmp.name
+
     def test_indicator_bad_accent_raises(self):
         for bad in ["#ZZZ", "#12345", "GGGGGG", ""]:
             with self.assertRaises(ValueError, msg=f"bad accent {bad!r}"):
-                _validate_indicator({"accent": bad, "gain": 6.0})
+                d.read_config(self._config_with({'accent = "#5468FF"': f'accent = "{bad}"'}))
 
     def test_indicator_bad_gain_raises(self):
-        import copy
-        for bad in [0, -1, 0.0, -0.5]:
+        for bad in ["0", "-1", "0.0", "-0.5", "true"]:
             with self.assertRaises(ValueError, msg=f"bad gain {bad}"):
-                _validate_indicator({"accent": "#7C5CFF", "gain": bad})
+                d.read_config(self._config_with({"gain = 6.0": f"gain = {bad}"}))
+
+    def test_negative_audio_thresholds_raise(self):
+        for old, new in [("min_seconds = 0.20", "min_seconds = -1"),
+                         ("silence_rms = 0.0012", "silence_rms = -0.5"),
+                         ("port = 8178", "port = 0"),
+                         ("threads = 6", "threads = true")]:
+            with self.assertRaises(ValueError, msg=new):
+                d.read_config(self._config_with({old: new}))
 
     # ------------------------------------------------------------------
     # process_audio indicator hooks
@@ -320,9 +339,6 @@ class DictationTests(unittest.TestCase):
              patch("pynput.keyboard.Listener") as mock_listener_cls:
 
             # Set up fake InputStream context manager
-            mock_stream = MagicMock()
-            mock_sd_cls.return_value.__enter__ = Mock(return_value=mock_stream)
-            mock_sd_cls.return_value.__exit__ = Mock(return_value=False)
 
             # Set up fake Listener
             mock_listener = MagicMock()
@@ -383,10 +399,6 @@ class DictationTests(unittest.TestCase):
              patch("sounddevice.InputStream") as mock_sd_cls, \
              patch("pynput.keyboard.Listener") as mock_listener_cls, \
              patch.object(d.queue, "Queue", side_effect=fake_queue):
-
-            mock_stream = MagicMock()
-            mock_sd_cls.return_value.__enter__ = Mock(return_value=mock_stream)
-            mock_sd_cls.return_value.__exit__ = Mock(return_value=False)
             mock_listener = MagicMock()
             mock_listener.running = True
             mock_listener_cls.return_value = mock_listener
@@ -434,8 +446,6 @@ class DictationTests(unittest.TestCase):
         def fake_input_stream(**kwargs):
             captured_callback[0] = kwargs.get("callback")
             m = MagicMock()
-            m.__enter__ = Mock(return_value=m)
-            m.__exit__ = Mock(return_value=False)
             return m
 
         with patch.object(d, "sound"), \
@@ -480,7 +490,8 @@ class DictationTests(unittest.TestCase):
                 stop.set()
                 t.join(timeout=2)
 
-        if captured_callback[0] is not None:
+        self.assertIsNotNone(captured_callback[0], "InputStream was never opened")
+        if True:
             ind.level.assert_called()
             actual_rms = ind.level.call_args[0][0]
             self.assertAlmostEqual(actual_rms, expected_rms, places=6)
@@ -500,8 +511,6 @@ class DictationTests(unittest.TestCase):
         def fake_input_stream(**kwargs):
             captured_callback[0] = kwargs.get("callback")
             m = MagicMock()
-            m.__enter__ = Mock(return_value=m)
-            m.__exit__ = Mock(return_value=False)
             return m
 
         with patch.object(d, "sound"), \
@@ -531,29 +540,8 @@ class DictationTests(unittest.TestCase):
             stop.set()
             t.join(timeout=2)
 
-        if captured_callback[0] is not None:
-            ind.level.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Helpers for validation tests
-# ---------------------------------------------------------------------------
-
-import re as _re
-
-
-def _validate_indicator(ind):
-    """Mirror the validation logic from read_config for unit-testing."""
-    accent = ind.get("accent", "#7C5CFF")
-    if not _re.fullmatch(r"#?[0-9A-Fa-f]{6}", accent):
-        raise ValueError("indicator.accent must be a 6-digit hex color")
-    gain = ind.get("gain", 6.0)
-    if not (isinstance(gain, (int, float)) and gain > 0):
-        raise ValueError("indicator.gain must be a positive number")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertIsNotNone(captured_callback[0], "InputStream was never opened")
+        ind.level.assert_not_called()
 
 
 class StreamStaleTests(unittest.TestCase):
@@ -568,3 +556,86 @@ class StreamStaleTests(unittest.TestCase):
 
     def test_threshold_is_configurable(self):
         self.assertFalse(d.stream_is_stale(100.0, 102.0, threshold=3.0))
+
+
+class LimitClipTests(unittest.TestCase):
+    """A clip that hits max_seconds while Option is held must be processed on release, not dropped."""
+
+    def _run(self, events, cfg_overrides=None):
+        import copy, numpy as np
+        cfg = copy.deepcopy(d.read_config(d.ROOT / "config.toml"))
+        cfg["audio"]["max_seconds"] = 1
+        services, stop, ind = Mock(), threading.Event(), Mock()
+        captured_q, captured_cb, started = [None], [None], []
+        original_queue = d.queue.Queue
+
+        def fake_queue():
+            q = original_queue(); captured_q[0] = q; return q
+
+        def fake_stream(**kwargs):
+            captured_cb[0] = kwargs.get("callback"); return MagicMock()
+
+        def fake_work(samples, mode, released, pid):
+            started.append((len(samples), pid))
+
+        with patch.object(d, "front_target", return_value=(42, None)), patch.object(d, "sound"), \
+             patch.object(d, "process_audio", side_effect=lambda *a, **k: started.append(a[3])), \
+             patch("sounddevice.InputStream", side_effect=fake_stream), \
+             patch("pynput.keyboard.Listener") as mock_listener_cls, \
+             patch.object(d.queue, "Queue", side_effect=fake_queue):
+            mock_listener_cls.return_value = MagicMock(running=True)
+            t = threading.Thread(target=d.run_live, args=(cfg, services, stop), kwargs={"indicator": ind}, daemon=True)
+            t.start()
+            deadline = time.monotonic() + 2
+            while (captured_q[0] is None or captured_cb[0] is None) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            q, cb = captured_q[0], captured_cb[0]
+            self.assertIsNotNone(q); self.assertIsNotNone(cb)
+            q.put(("press", time.perf_counter())); time.sleep(0.05)
+            # 1 s of loud audio at 16 kHz in 320-sample blocks -> hits max_seconds and emits "limit".
+            chunk = (np.ones((320, 1), dtype=np.int16) * 3000)
+            for _ in range(50):
+                cb(chunk, 320, None, None)
+            time.sleep(0.1)
+            after_limit = list(started)
+            q.put(("release", time.perf_counter())); time.sleep(0.2)
+            stop.set(); t.join(timeout=3)
+        return after_limit, started, ind
+
+    def test_limit_waits_for_release_then_processes(self):
+        after_limit, started, ind = self._run(None)
+        self.assertEqual(after_limit, [], "worker must not start while Option is still held")
+        self.assertEqual(len(started), 1, "clip must be processed once Option is released")
+        ind.processing.assert_called()
+
+
+class OverlayRunnerTests(unittest.TestCase):
+    def test_run_live_exception_propagates_from_overlay_runner(self):
+        """H1: a crash in the dictation thread must surface as an exception (non-zero exit for launchd)."""
+        fake_appkit = MagicMock()
+        fake_helper = MagicMock()
+
+        def fake_run_event_loop(**kwargs):
+            # Simulate the main loop running until the live thread asks it to stop.
+            deadline = time.monotonic() + 2
+            while fake_helper.callAfter.call_count == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        fake_helper.runEventLoop.side_effect = fake_run_event_loop
+        fake_overlay = MagicMock()
+        fake_overlay.parse_hex.return_value = (0, 0, 0)
+        modules = {"AppKit": fake_appkit, "PyObjCTools": MagicMock(AppHelper=fake_helper),
+                   "PyObjCTools.AppHelper": fake_helper, "overlay": fake_overlay}
+        cfg = {"indicator": {"enabled": True, "accent": "#000000", "gain": 6.0}}
+        with patch.dict(sys.modules, modules), \
+             patch.object(d, "run_live", side_effect=RuntimeError("Keyboard listener stopped")), \
+             patch.object(d.signal, "signal"):
+            with self.assertRaises(RuntimeError):
+                d._run_live_with_overlay(cfg, Mock(), threading.Event())
+        kwargs = fake_helper.runEventLoop.call_args.kwargs
+        self.assertIn("unexpectedErrorAlert", kwargs, "PyObjC's default alert exits 0 on Quit")
+        self.assertTrue(kwargs["unexpectedErrorAlert"](), "handler must keep the loop running")
+
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -78,6 +78,9 @@ under an old layout can stay invisible. To check the pill without speaking, flas
 kill -USR1 "$(cat .run/dictate.pid)"
 ```
 
+The flash is ignored while a real recording is in progress, and the signal is a no-op when the indicator is
+disabled. Errors (for example "microphone unavailable") show the pill in red for 1.2 s even when it was hidden.
+
 ## Start and stop
 
 In Terminal:
@@ -159,7 +162,9 @@ been quiet for over a second, logs `reopening microphone stream`, and reopens it
 that captured nothing logs `No audio received during hold` and forces a reopen next time.
 While idle, a watchdog runs the same check every 2 s, so after a wake the stream is usually healed before
 you press Option (`Microphone stream reopened` in the log). If the microphone is truly unavailable the
-reopen is retried every 15 s. The LaunchAgent (KeepAlive) restarts Flow if the process itself ever dies.
+reopen is retried every 15 s. A crash inside the dictation loop exits non-zero, with the overlay on or off, so the
+LaunchAgent (KeepAlive) restarts Flow; a clean `--stop` is the only exit it does not restart. A single failing
+event (for example no frontmost app while the screen is locked) is logged and skipped rather than ending the loop.
 Live recordings stay in memory. `dictate.log` records timing/status, not dictated text.
 Service diagnostics are in `.run/`; test recordings/results are in `tests/`.
 Logs rotate after 2 MB. Stop Flow when you do not need the microphone.
@@ -168,7 +173,12 @@ The clipboard's materialized formats (including rich text/images/files) are save
 If another app/user copies something during paste, that newer clipboard is preserved.
 Unavailable promised clipboard items cause paste to cancel. Clipboard managers may still retain pasted text.
 Changing the focused app/window during transcription cancels the paste. Stay in the same field until insertion completes.
-Very short/silent clips and audio-overflow clips are discarded; max recording length is 120 seconds.
+Very short/silent clips and audio-overflow clips are discarded; max recording length is 120 seconds. A clip that
+hits the limit while Option is still held is kept and processed when you release the key, because pasting while a
+modifier is down would be cancelled.
+
+The clipboard is restored `clipboard_restore_seconds` (default 0.45 s) after Cmd+V is sent. A target app that
+services the paste later than that receives your previous clipboard instead; raise the value if that ever happens.
 Wait for processing to finish before holding the hotkey again. Cleanup errors fall back to the original transcript.
 
 ## Tests and latency

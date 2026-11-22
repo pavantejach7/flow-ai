@@ -203,10 +203,6 @@ class OverlayPanelTests(unittest.TestCase):
         self.assertEqual(len(panel.state.levels), before + 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class _Pt:
     def __init__(self, x, y): self.x, self.y = x, y
 
@@ -248,7 +244,36 @@ class FlashTests(unittest.TestCase):
         panel = ov.OverlayPanel.__new__(ov.OverlayPanel)
         panel._AppHelper = FakeHelper
         panel.state = ov.IndicatorState()
+        panel._gen = 0
         panel.flash(1.0)
         self.assertEqual(calls[0], ("after", "_show"))
-        self.assertEqual(calls[-1], ("later", 1.0, "idle"))
-        self.assertTrue(any(c[0] == "later" and c[2] == "level" for c in calls))
+        self.assertEqual(calls[-1], ("later", 1.0, "_idle_if_gen"))
+        self.assertTrue(any(c[0] == "later" and c[2] == "_flash_level" for c in calls))
+
+    def test_flash_is_ignored_while_recording(self):
+        calls = []
+        class FakeHelper:
+            @staticmethod
+            def callAfter(fn, *a): calls.append(fn)
+            @staticmethod
+            def callLater(delay, fn, *a): calls.append(fn)
+        panel = ov.OverlayPanel.__new__(ov.OverlayPanel)
+        panel._AppHelper = FakeHelper
+        panel.state = ov.IndicatorState(); panel.state.set_recording(); panel._gen = 3
+        panel.flash(1.0)
+        self.assertEqual(calls, [])
+
+    def test_stale_error_hide_does_not_hide_newer_recording(self):
+        panel = ov.OverlayPanel.__new__(ov.OverlayPanel)
+        panel.state = ov.IndicatorState(); panel._gen = 5
+        hidden = []
+        panel._hide = lambda: hidden.append(True)
+        panel.state.set_recording()
+        panel._hide_after_error(4)   # scheduled by an older error
+        self.assertEqual(hidden, []); self.assertEqual(panel.state.state, ov.RECORDING)
+        panel._hide_after_error(5)   # current generation
+        self.assertEqual(hidden, [True])
+
+
+if __name__ == "__main__":
+    unittest.main()

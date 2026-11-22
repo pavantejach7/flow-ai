@@ -59,6 +59,14 @@ def read_config(filename):
     cfg["ollama"]["url"] = local_url(cfg["ollama"]["url"])
     if cfg["whisper"]["host"] != "127.0.0.1":
         raise ValueError("Whisper must bind to 127.0.0.1")
+    for table, key in (("audio", "min_seconds"), ("audio", "silence_rms"), ("ollama", "timeout_seconds")):
+        value = cfg[table][key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError(f"{table}.{key} must be a non-negative number")
+    for table, key in (("whisper", "port"), ("whisper", "threads")):
+        value = cfg[table][key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{table}.{key} must be a positive integer")
     if "cloud" in cfg["ollama"]["model"].lower():
         raise ValueError("Cloud models are not allowed")
     if cfg["audio"]["sample_rate"] != 16000:
@@ -73,7 +81,7 @@ def read_config(filename):
     if not re.fullmatch(r"#?[0-9A-Fa-f]{6}", accent):
         raise ValueError("indicator.accent must be a 6-digit hex color")
     gain = ind.get("gain", 6.0)
-    if not (isinstance(gain, (int, float)) and gain > 0):
+    if isinstance(gain, bool) or not (isinstance(gain, (int, float)) and gain > 0):
         raise ValueError("indicator.gain must be a positive number")
     return cfg
 
@@ -234,13 +242,17 @@ def wav_bytes(samples):
 
 
 def front_pid():
+    """PID of the frontmost app, or None during lock/fast-user-switch transitions."""
     from AppKit import NSWorkspace
-    return NSWorkspace.sharedWorkspace().frontmostApplication().processIdentifier()
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    return None if app is None else app.processIdentifier()
 
 
 def front_target():
     import ApplicationServices as AX
     pid = front_pid()
+    if pid is None:
+        return None, None
     app = AX.AXUIElementCreateApplication(pid)
     error, window = AX.AXUIElementCopyAttributeValue(app, AX.kAXFocusedWindowAttribute, None)
     if error or window is None:
@@ -299,10 +311,9 @@ def paste(text, cfg, expected_pid):
         if current_app != expected_app:
             raise RuntimeError(
                 f"Paste cancelled: focused app changed during transcription "
-                f"(expected {expected_pid!r}, found {current!r})")
+                f"(expected pid {expected_app}, found pid {current_app})")
         if current != expected_pid:
-            LOG.info("Window title changed during transcription (%r -> %r); pasting anyway",
-                     expected_pid, current)
+            LOG.info("Window title changed during transcription (pid %s); pasting anyway", current_app)
     pb = NSPasteboard.generalPasteboard()
     before = pb.changeCount()
     saved = snapshot_clipboard(pb)
@@ -513,6 +524,8 @@ def run_live(cfg, services, stop, indicator=None):
                     state["recording"] = False
                     events.put(("limit", time.perf_counter()))
 
+    pending = None  # Clip that hit max_seconds; processed once the hold key is released.
+
     def work(samples, mode, released, pid):
         try:
             process_audio(services, cfg, wav_bytes(samples), mode, released, pid, stop, indicator)
@@ -523,6 +536,76 @@ def run_live(cfg, services, stop, indicator=None):
             indicator.error(str(exc))
         finally:
             events.put(("done", time.perf_counter()))
+
+    def start_worker(samples, mode, released, pid):
+        nonlocal worker
+        indicator.processing()
+        worker = threading.Thread(target=work, args=(samples, mode, released, pid))
+        worker.start()
+        return True
+
+    def _dispatch(event, timestamp):
+        """Handle one hotkey/worker event. Returns the new (busy, pending)."""
+        nonlocal raw, target, clip_raw, busy, pending
+        if event == "done":
+            busy = False
+        elif event == "toggle":
+            raw = not raw
+            LOG.info("Mode: %s (applies to next recording)", "RAW / CODE" if raw else "CLEANUP")
+            sound(cfg, "raw" if raw else "clean")
+            indicator.mode(raw)
+        elif event == "press" and not busy:
+            retry_after[0] = min(retry_after[0], time.monotonic())  # A press always gets one try.
+            if not ensure_stream():
+                sound(cfg, "error")
+                indicator.error("microphone unavailable")
+                return busy, pending
+            target = front_target()
+            clip_raw = raw
+            with audio_lock:
+                state.update(recording=True, chunks=[], count=0, overflow=False, limit=False)
+            sound(cfg, "start")
+            LOG.info("Recording mode=%s", "raw" if clip_raw else "cleanup")
+            indicator.recording()
+        elif event in ("release", "limit"):
+            with audio_lock:
+                if not state["recording"] and event != "limit":
+                    if event == "release" and pending is not None:
+                        busy = start_worker(*pending)
+                        pending = None
+                    return busy, pending
+                state["recording"] = False
+                chunks, overflow = state["chunks"], state["overflow"]
+                state["chunks"] = []
+            sound(cfg, "stop")
+            if event == "limit":
+                LOG.warning("Recording reached max_seconds")
+            if not chunks:
+                LOG.warning("No audio received during hold; microphone stream will be reopened on next press")
+                with audio_lock:
+                    state["last_callback"] = 0.0  # Force a reopen next time.
+                indicator.idle()
+                return busy, pending
+            samples = np.concatenate(chunks).reshape(-1)
+            duration = samples.size / 16000
+            rms = float(np.sqrt(np.mean((samples.astype(np.float32) / 32768) ** 2)))
+            LOG.info("Captured %.2fs rms=%.4f", duration, rms)
+            if overflow:
+                LOG.error("Audio overflow; discarded clip. Try another input device.")
+                indicator.idle()
+                return busy, pending
+            if discard_short_or_silent(cfg, duration, rms):
+                indicator.idle()
+                return busy, pending
+            if event == "limit":
+                # Option is still held: the modifier guard would cancel the paste, so wait for release.
+                pending = (samples, clip_raw, timestamp, target)
+                indicator.processing()
+                return busy, pending
+            busy = start_worker(samples, clip_raw, timestamp, target)
+        elif event == "press" and busy:
+            LOG.info("Still processing; wait for latency log before recording again")
+        return busy, pending
 
     listener = keyboard.Listener(on_press=lambda k: key_event(k, True), on_release=lambda k: key_event(k, False))
     stream = [None]
@@ -567,7 +650,7 @@ def run_live(cfg, services, stop, indicator=None):
             # A reopen can "succeed" while the Mac is asleep or the mic is suspended and still deliver
             # no audio; do not churn every watchdog tick. A real press still retries immediately.
             retry_after[0] = time.monotonic() + STREAM_RETRY_SECONDS
-        LOG.info("Microphone stream reopened")
+        LOG.info("Microphone stream reopened; waiting for audio")
         return True
 
     last_watchdog = time.monotonic()
@@ -590,59 +673,14 @@ def run_live(cfg, services, stop, indicator=None):
                         last_watchdog = now
                         ensure_stream(background=True)
                     continue
-                if event == "done":
-                    busy = False
-                elif event == "toggle":
-                    raw = not raw
-                    LOG.info("Mode: %s (applies to next recording)", "RAW / CODE" if raw else "CLEANUP")
-                    sound(cfg, "raw" if raw else "clean")
-                    indicator.mode(raw)
-                elif event == "press" and not busy:
-                    retry_after[0] = min(retry_after[0], time.monotonic())  # A press always gets one try.
-                    if not ensure_stream():
-                        sound(cfg, "error")
-                        indicator.error("microphone unavailable")
-                        continue
-                    target = front_target()
-                    clip_raw = raw
-                    with audio_lock:
-                        state.update(recording=True, chunks=[], count=0, overflow=False, limit=False)
-                    sound(cfg, "start")
-                    LOG.info("Recording mode=%s", "raw" if clip_raw else "cleanup")
-                    indicator.recording()
-                elif event in ("release", "limit"):
-                    with audio_lock:
-                        if not state["recording"] and event != "limit":
-                            continue
-                        state["recording"] = False
-                        chunks, overflow = state["chunks"], state["overflow"]
-                        state["chunks"] = []
-                    sound(cfg, "stop")
-                    if event == "limit":
-                        LOG.warning("Recording reached max_seconds")
-                    if not chunks:
-                        LOG.warning("No audio received during hold; microphone stream will be reopened on next press")
-                        with audio_lock:
-                            state["last_callback"] = 0.0  # Force a reopen next time.
-                        indicator.idle()
-                        continue
-                    samples = np.concatenate(chunks).reshape(-1)
-                    duration = samples.size / 16000
-                    rms = float(np.sqrt(np.mean((samples.astype(np.float32) / 32768) ** 2)))
-                    LOG.info("Captured %.2fs rms=%.4f", duration, rms)
-                    if overflow:
-                        LOG.error("Audio overflow; discarded clip. Try another input device.")
-                        indicator.idle()
-                        continue
-                    if discard_short_or_silent(cfg, duration, rms):
-                        indicator.idle()
-                        continue
-                    busy = True
-                    indicator.processing()
-                    worker = threading.Thread(target=work, args=(samples, clip_raw, timestamp, target))
-                    worker.start()
-                elif event == "press" and busy:
-                    LOG.info("Still processing; wait for latency log before recording again")
+                try:
+                    busy, pending = _dispatch(event, timestamp)
+                except Exception as exc:  # One bad event must not end dictation (and the process).
+                    LOG.error("Event %s failed: %s: %s", event, type(exc).__name__, exc)
+                    sound(cfg, "error")
+                    indicator.error(str(exc))
+                    if event == "done":
+                        busy = False
     finally:
         listener.stop()
         if stream[0] is not None:
@@ -668,9 +706,15 @@ def _run_live_with_overlay(cfg, services, stop):
     gain = ind_cfg.get("gain", 6.0)
     panel = OverlayPanel(accent, gain)
 
-    live_thread = threading.Thread(
-        target=run_live, args=(cfg, services, stop), kwargs={"indicator": panel}, daemon=True
-    )
+    outcome = {}
+
+    def _live():
+        try:
+            run_live(cfg, services, stop, indicator=panel)
+        except BaseException as exc:  # Re-raised on the main thread so launchd sees a failure.
+            outcome["exc"] = exc
+
+    live_thread = threading.Thread(target=_live, daemon=True)
     live_thread.start()
 
     # When run_live finishes on its own, stop the event loop.
@@ -693,9 +737,15 @@ def _run_live_with_overlay(cfg, services, stop):
     # Python code executes there, which _poll_stop guarantees within 0.2 s.
     signal.signal(signal.SIGUSR1, lambda *_: panel.flash(2.0))
 
+    def _indicator_error():
+        LOG.exception("Indicator error on the main thread; continuing")
+        return True  # Keep running instead of PyObjC's modal alert whose Quit exits 0.
+
     AppHelper.callLater(0.2, _poll_stop)
-    AppHelper.runEventLoop()
+    AppHelper.runEventLoop(unexpectedErrorAlert=_indicator_error, installInterrupt=False)
     live_thread.join()
+    if "exc" in outcome:
+        raise outcome["exc"]
 
 
 def main():
@@ -777,6 +827,7 @@ def main():
             if cfg.get("indicator", {}).get("enabled"):
                 _run_live_with_overlay(cfg, services, stop)
             else:
+                signal.signal(signal.SIGUSR1, signal.SIG_IGN)  # Flash signal is a no-op without the pill.
                 run_live(cfg, services, stop)
     finally:
         services.close()

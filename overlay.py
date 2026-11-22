@@ -101,6 +101,8 @@ class OverlayPanel:
     AppHelper.callAfter().  level() skips marshalling (audio-callback path).
     """
 
+    _gen = 0  # Show generation; see recording()/_hide_after_error().
+
     def __init__(self, accent_rgb: tuple, gain: float = 6.0, capacity: int = 32):
         # Deferred imports keep Part (a) import-clean and tests patchable.
         import AppKit
@@ -119,6 +121,7 @@ class OverlayPanel:
 
         self._build_panel()
         self._visible = False
+        self._gen = 0  # Bumped on every show; delayed hides check it so they never hide a newer recording.
         self._observe_screen_changes()
 
     # ------------------------------------------------------------------
@@ -150,16 +153,36 @@ class OverlayPanel:
             old.close()
         except Exception:
             pass
-        self._build_panel()
+        try:
+            self._build_panel()
+        except Exception as exc:  # Keep the old (possibly stale) panel rather than crash the main thread.
+            import logging
+            logging.getLogger("flow").error("Indicator panel rebuild failed: %s", exc)
+            self._panel = old
+            return
         if was_visible:
             self._show()
 
     def flash(self, seconds: float = 2.0):
-        """Show the pill in recording state for `seconds`, then hide (self-test; any thread)."""
+        """Show the pill in recording state for `seconds`, then hide (self-test; any thread).
+
+        Ignored while a real recording or processing is under way so it never disturbs one.
+        """
+        if self.state.state != IDLE:
+            return
         self.recording()
+        gen = self._gen
         for i in range(1, int(seconds * 10)):
-            self._AppHelper.callLater(i / 10.0, self.level, 0.02 + 0.03 * ((i % 7) / 7.0))
-        self._AppHelper.callLater(seconds, self.idle)
+            self._AppHelper.callLater(i / 10.0, self._flash_level, gen, 0.02 + 0.03 * ((i % 7) / 7.0))
+        self._AppHelper.callLater(seconds, self._idle_if_gen, gen)
+
+    def _flash_level(self, gen, rms):
+        if gen == self._gen:
+            self.state.push_level(rms)
+
+    def _idle_if_gen(self, gen):
+        if gen == self._gen:
+            self.idle()
 
     # ------------------------------------------------------------------
     # Panel construction
@@ -252,7 +275,9 @@ class OverlayPanel:
         self._stop_timer()
         self._panel.orderOut_(None)
 
-    def _hide_after_error(self):
+    def _hide_after_error(self, gen):
+        if gen != self._gen:  # A newer recording/processing started; leave it alone.
+            return
         self.state.set_idle()
         self._hide()
 
@@ -261,6 +286,7 @@ class OverlayPanel:
     # ------------------------------------------------------------------
 
     def recording(self):
+        self._gen += 1
         self.state.set_recording()
         self._AppHelper.callAfter(self._show)
 
@@ -269,17 +295,19 @@ class OverlayPanel:
         self.state.push_level(rms)
 
     def processing(self):
+        self._gen += 1
         self.state.set_processing()
-        self._AppHelper.callAfter(self._pill.setNeedsDisplay_, True)
+        self._AppHelper.callAfter(self._show)  # Also covers a limit-clip whose pill was already showing.
 
     def idle(self):
         self.state.set_idle()
         self._AppHelper.callAfter(self._hide)
 
     def error(self, text: str = ""):
+        self._gen += 1
         self.state.set_error(text)
-        self._AppHelper.callAfter(self._pill.setNeedsDisplay_, True)
-        self._AppHelper.callLater(1.2, self._hide_after_error)
+        self._AppHelper.callAfter(self._show)  # The error may arrive while the pill is hidden.
+        self._AppHelper.callLater(1.2, self._hide_after_error, self._gen)
 
     def mode(self, raw: bool):
         self.state.set_mode(raw)
