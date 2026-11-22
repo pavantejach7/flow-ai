@@ -1,0 +1,56 @@
+[
+  {
+    "model": "models/ggml-large-v3-turbo.bin",
+    "run": 1,
+    "whisper_s": 0.352,
+    "cleanup_s": 0.51,
+    "pipeline_s": 0.862,
+    "transcript": "Um please send the draft to my year on Tuesday, scratch that, Wednesday, and keep the current\n title, I will review it after launch.",
+    "cleaned": "Please send the draft to me by Wednesday and keep the current title. I will review it after launch."
+  },
+  {
+    "model": "models/ggml-large-v3-turbo.bin",
+    "run": 2,
+    "whisper_s": 0.267,
+    "cleanup_s": 0.489,
+    "pipeline_s": 0.756,
+    "transcript": "Um please send the draft to my year on Tuesday, scratch that, Wednesday, and keep the current\n title, I will review it after launch.",
+    "cleaned": "Please send the draft to me by Wednesday and keep the current title. I will review it after launch."
+  },
+  {
+    "model": "models/ggml-large-v3-turbo.bin",
+    "run": 3,
+    "whisper_s": 0.254,
+    "cleanup_s": 0.481,
+    "pipeline_s": 0.735,
+    "transcript": "Um please send the draft to my year on Tuesday, scratch that, Wednesday, and keep the current\n title, I will review it after launch.",
+    "cleaned": "Please send the draft to me by Wednesday and keep the current title. I will review it after launch."
+  },
+  {
+    "model": "models/ggml-base.en.bin",
+    "run": 1,
+    "whisper_s": 0.104,
+    "cleanup_s": 0.527,
+    "pipeline_s": 0.631,
+    "transcript": "Om please send the draft to Myia on Tuesday, scratch that, Wednesday, and keep the current\n title, I will review it after launch.",
+    "cleaned": "Please send the draft to Myia on Wednesday and keep the current title. I will review it after launch."
+  },
+  {
+    "model": "models/ggml-base.en.bin",
+    "run": 2,
+    "whisper_s": 0.082,
+    "cleanup_s": 0.492,
+    "pipeline_s": 0.574,
+    "transcript": "Om please send the draft to Myia on Tuesday, scratch that, Wednesday, and keep the current\n title, I will review it after launch.",
+    "cleaned": "Please send the draft to Myia on Wednesday and keep the current title. I will review it after launch."
+  },
+  {
+    "model": "models/ggml-base.en.bin",
+    "run": 3,
+    "whisper_s": 0.096,
+    "cleanup_s": 0.506,
+    "pipeline_s": 0.602,
+    "transcript": "Om please send the draft to Myia on Tuesday, scratch that, Wednesday, and keep the current\n title, I will review it after launch.",
+    "cleaned": "Please send the draft to Myia on Wednesday and keep the current title. I will review it after launch."
+  }
+]

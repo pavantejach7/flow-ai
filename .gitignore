@@ -1,0 +1,18 @@
+# Virtualenv and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime state (pid/lock files, launchd output) and logs
+.run/
+*.log
+*.log.*
+
+# Downloaded whisper models (1.7 GB; see README for download)
+models/*.bin
+
+# Recorded audio samples
+tests/audio/
+
+# macOS
+.DS_Store

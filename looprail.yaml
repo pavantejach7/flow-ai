@@ -1,0 +1,115 @@
+# Flow's looprail loop - implement-plan shape (existing codebase, full regression run,
+# critic checks the change does what was asked). Tiers by role: planner and critic
+# on opus (plan quality and the verdict bound the whole loop), executor on sonnet
+# (a small, well-specified edit; the loop + verifiers compensate). The critic is a
+# different model than the worker. Flow is not a git repo, so blind review is
+# unavailable; scope + no_weaker_tests are the structural rails.
+#
+#   looprail lint looprail.yaml && looprail run --dry-run && looprail run --ui
+name: flow-overlay-indicator
+goal: |
+  Add a floating on-screen recording indicator to Flow, in the style of the
+  Wispr Flow bar: a small dark rounded pill at the bottom center of the main
+  screen that appears while the user holds the hotkey, shows a live audio
+  waveform driven by the microphone level, switches to a processing animation
+  after release, and hides when done. Flow is dictate.py: a hold-to-talk
+  dictation daemon whose main thread currently runs run_live() (pynput hotkeys
+  + a sounddevice input stream whose callback appends chunks while recording +
+  a worker thread for whisper/cleanup/paste). Read dictate.py, config.toml and
+  tests/test_dictate.py fully before planning.
+
+  Requirements:
+  1. New module overlay.py with two parts. (a) A pure-Python IndicatorState
+     model with no AppKit imports, headlessly unit-testable: states idle,
+     recording, processing, error; a bounded ring buffer of recent audio levels
+     (floats 0..1, e.g. the last 32 chunk rms values scaled by a configurable
+     gain so normal speech fills roughly half the bar height); current mode
+     (cleanup/raw); last latency text; last error text; and a parse_hex()
+     helper that turns "#7C5CFF" into (r,g,b) floats. (b) An OverlayPanel view
+     using PyObjC AppKit: a borderless, non-activating NSPanel (style mask
+     Borderless | NonactivatingPanel), floating window level, hasShadow false,
+     opaque false with clear background color, ignoresMouseEvents true,
+     collection behavior CanJoinAllSpaces | FullScreenAuxiliary | Stationary,
+     sized about 200x48 points, centered horizontally on NSScreen.mainScreen
+     about 72 points above the bottom edge. Its content is a custom NSView
+     subclass whose drawRect_ paints a rounded pill (corner radius = half the
+     height) filled dark (about rgb 18,18,22 at 0.92 alpha) with a 1-point
+     border in the accent color at 0.35 alpha, and inside it: recording = a row
+     of about 24 vertical rounded bars whose heights follow the level buffer
+     (newest on the right), filled with the accent color, a tiny red dot at the
+     left as the "live" marker; processing = three accent-colored dots that
+     pulse in sequence; error = the pill border and dots in red for about 1.2 s
+     before hiding; idle = the panel is ordered out (hidden). Redraw with a
+     repeating NSTimer at about 30 Hz only while the panel is visible. The
+     accent color comes from config (see 3). Every AppKit mutation (show,
+     hide, state change, setNeedsDisplay) must be marshalled to the main thread
+     via PyObjC AppHelper.callAfter or
+     performSelectorOnMainThread_withObject_waitUntilDone_, because state
+     changes originate from the hotkey, audio-callback and worker threads; the
+     audio callback must only write a float into the model (no AppKit, no
+     locks held long, no allocation beyond the rms computation).
+  2. dictate.py: run_live() gains an optional indicator argument defaulting to
+     a no-op object with the same method names, and calls it at the existing
+     transitions: recording on the "press" branch; a per-chunk level from the
+     sounddevice callback while recording (rms of the chunk, computed the same
+     way as the existing clip rms); processing when the worker thread starts;
+     idle when the clip is discarded, when "No speech returned" happens, or
+     when the worker finishes successfully; error when the worker raises;
+     mode on toggle; latency text after the latency log line. In main(), when
+     running live (not --transcribe/--check/--stop/--paste-test/--hotkey-test)
+     and config indicator.enabled is true, run run_live in a daemon thread and
+     give the main thread to AppKit (NSApplication with activation policy
+     Accessory so there is no Dock icon; AppHelper.runEventLoop). SIGTERM and
+     SIGINT must still stop Flow cleanly: the existing stop Event, polled by
+     a repeating NSTimer or AppHelper.callLater that calls
+     AppHelper.stopEventLoop, and when run_live's thread ends on its own the
+     event loop must also stop; the "Stopped" log line, services.close() and
+     pid-file cleanup must still happen. When indicator.enabled is false,
+     behavior must be exactly as today (run_live on the main thread, no AppKit).
+  3. config.toml: add a new [indicator] table with enabled = true,
+     accent = "#7C5CFF" and gain = 6.0, each with a one-line comment; read_config
+     must validate accent as a 6-digit hex and gain as a positive number.
+  4. Tests: add tests/test_overlay.py covering IndicatorState transitions, the
+     level ring buffer bounds and scaling, parse_hex, and that OverlayPanel
+     marshals every mutation to the main thread (patch AppKit/AppHelper, no
+     real window); extend tests/test_dictate.py so run_live's transitions and
+     the audio callback call the indicator (reuse the existing mocking style)
+     and that the new config keys are validated. All existing tests must keep
+     passing unchanged; no test may start a real NSApplication or open a
+     window.
+  5. Do not change hotkey, capture, discard, transcription, cleanup, or paste
+     behavior. No new dependencies beyond PyObjC (AppKit, Quartz, Foundation
+     are installed in .venv).
+
+  Done means: .venv/bin/python -m unittest discover -s tests exits 0 including
+  the new tests, and a critic confirms requirements 1-5 are each met and the
+  live dictation path is otherwise unchanged.
+
+# agent writes tests, so the suite may only grow stronger
+no_weaker_tests: true
+# the change has a known surface; anything else touched fails the iteration
+# log files are listed because the live Flow daemon writes them during a run; without them the scope rail halts
+scope: ["dictate.py", "overlay.py", "config.toml", "tests/test_dictate.py", "tests/test_overlay.py", "dictate.log", ".run/**"]
+
+agents:
+  planner: { adapter: claude-code, model: opus,   permissions: safe }   # strong: plan quality bounds the loop
+  worker:  { adapter: claude-code, model: sonnet, permissions: safe }   # medium: small, well-specified change
+  checker: { adapter: claude-code, model: opus,   permissions: safe }   # strong, different model than worker
+
+graph:
+  plan:  { role: planner, agent: planner,
+           prompt: Read dictate.py, config.toml and tests/test_dictate.py in full. Plan the IndicatorState model, the NSPanel overlay view and its drawing, the exact call sites in run_live (including the audio callback level feed), and the main-thread handoff in main() including how SIGTERM still stops the AppKit run loop. Name which existing tests are the templates for the new ones. }
+  build: { role: executor, agent: worker, after: plan,
+           prompt: Implement the plan. Match the existing code style (LOG.info %-formatting, small functions, no new dependencies) and the existing unittest style (patch.object, SimpleNamespace, Mock). Keep dictate.py changes minimal; put AppKit code only in overlay.py. Run the full suite yourself before finishing. }
+  tests: { role: tester, after: build, run: .venv/bin/python -m unittest discover -s tests, expect: exit 0 }
+  crit:  { role: critic, agent: checker, of: build, after: tests,
+           prompt: Check each of requirements 1-5 against the actual files. Fail if any AppKit call can run off the main thread, if the audio callback does anything beyond storing a level, if SIGTERM would no longer stop Flow when indicator.enabled is true, if behavior with indicator.enabled=false differs from the original, if any existing test was weakened, if any test starts a real NSApplication, or if the hotkey/capture/paste path changed. If you pass, list remaining shortcomings on a GAPS: line. }
+
+rails:
+  max_iterations: 6
+  max_cost_usd: 20
+  max_wall_minutes: 45
+  stall_after: 2
+  replan_limit: 1
+
+verdict: { policy: all-pass }

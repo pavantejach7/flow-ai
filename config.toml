@@ -1,0 +1,43 @@
+[hotkeys]
+hold = "<alt>" # This Mac reports both Option keys as Key.alt. Either Option works.
+toggle_raw = "<ctrl>+<shift>+r"
+
+[audio]
+sample_rate = 16000
+device = "" # Empty = default microphone; see --devices.
+max_seconds = 120
+min_seconds = 0.20
+silence_rms = 0.0012 # Just above this room's noise floor (~0.001); quiet speech measured 0.0017.
+sounds = true
+cue_volume = 1.0 # 0-1, scaled on top of system output volume. Lower only if cues are too loud.
+
+[whisper]
+binary = "/opt/homebrew/bin/whisper-server"
+model = "models/ggml-large-v3-turbo.bin"
+fallback_model = "models/ggml-base.en.bin"
+host = "127.0.0.1"
+port = 8178
+threads = 6
+language = "en"
+
+[ollama]
+binary = "/usr/local/bin/ollama"
+url = "http://127.0.0.1:11434"
+model = "qwen3:8b"
+keep_alive = -1
+num_ctx = 2048
+num_predict = 512
+timeout_seconds = 45
+
+[dictation]
+cleanup = true
+dictionary = "dictionary.txt"
+clipboard_restore_seconds = 0.30
+cancel_if_app_changes = true
+single_line = true # Avoid embedded newlines in terminal pastes.
+log = "dictate.log"
+
+[indicator]
+enabled = true      # Show the floating recording pill while dictating.
+accent = "#5468FF"  # Infyva blue for dark surfaces (brand primary is #0115E8).
+gain = 6.0          # Mic-level-to-bar gain; higher = taller bars for quiet speech.

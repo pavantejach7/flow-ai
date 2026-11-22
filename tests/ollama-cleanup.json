@@ -1,0 +1,20 @@
+[
+  {
+    "run": 1,
+    "wall_seconds": 4.791,
+    "output": "Send the draft to Maya on Wednesday and keep the current title.",
+    "done_reason": "stop",
+    "load_seconds": 4.107499583,
+    "eval_seconds": 0.269025,
+    "tokens": 14
+  },
+  {
+    "run": 2,
+    "wall_seconds": 0.273,
+    "output": "Send the draft to Maya on Wednesday and keep the current title.",
+    "done_reason": "stop",
+    "load_seconds": 0.000550792,
+    "eval_seconds": 0.250841,
+    "tokens": 14
+  }
+]

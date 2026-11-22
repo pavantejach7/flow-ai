@@ -1,0 +1,25 @@
+{
+  "preexisting": [
+    "Xcode Command Line Tools",
+    "Homebrew",
+    "ffmpeg 9.0.2_1",
+    "python@3.12 3.12.16",
+    "Ollama 0.40.13",
+    "llama3.2:3b"
+  ],
+  "installed_formulae": [
+    "whisper.cpp",
+    "libomp",
+    "ggml",
+    "llama.cpp"
+  ],
+  "downloaded_models": [
+    "models/ggml-large-v3-turbo.bin",
+    "models/ggml-base.en.bin"
+  ],
+  "ollama_model_requested": "qwen3:8b",
+  "login_agent_installed": false,
+  "python_environment": ".venv",
+  "python_dependencies_lock": "requirements.lock",
+  "ollama_model_installed": "qwen3:8b"
+}

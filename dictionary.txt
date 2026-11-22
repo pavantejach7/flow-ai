@@ -1,0 +1,6 @@
+# One name or term per line. Comments and blank lines are ignored.
+# Examples (uncomment or replace with your own):
+# Your Name
+# Ollama
+# whisper.cpp
+# Claude Code
